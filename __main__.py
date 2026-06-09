@@ -128,7 +128,7 @@ while True:
 
                     record = {
                         "شرکت": company_name,
-                        "تاریخ_انتشار": date,
+                        "تاریخ_گزارش": date,
                         "رشته_بیمه": insurance_field
                     }
 
