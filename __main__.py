@@ -99,8 +99,15 @@ while True:
                     if h2: curr_h2 = h2
 
                     if curr_h1 or curr_h2 or h3:
-                        clean_h1 = curr_h1.replace('از ابتدای سال مالی تا پایان مورخ', 'تجمعی').replace(
-                            'دوره یک ماهه منتهی به', 'ماهانه')
+                        clean_h1 = curr_h1.replace('از ابتدای سال مالی تا پایان مورخ', 'تجمعی') \
+                            .replace('دوره یک ماهه منتهی به', 'ماهانه')
+
+                        # حذف تاریخ شمسی مثل 1405/01/31
+                        clean_h1 = re.sub(r'\d{4}/\d{2}/\d{2}', '', clean_h1)
+
+                        # حذف کلمه "منتهی به" اگر باقی موند
+                        clean_h1 = clean_h1.replace('منتهی به', '').strip()
+
                         full_name = (f"{clean_h1}_{curr_h2}_{h3}".
                                      replace(" | ", "_").
                                      replace("(", "").replace(")","").
