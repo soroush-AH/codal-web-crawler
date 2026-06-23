@@ -2,11 +2,23 @@ import requests
 import json
 import pandas as pd
 import re
+import time
+import logging
+from datetime import datetime
 from sqlalchemy import create_engine
 
-header = {"user-agent": "Mozilla/5.0"}
-records = []
+import jdatetime          # pip install jdatetime
 
+
+# ---------- تنظیمات لاگ ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[logging.FileHandler("codal_job.log", encoding="utf-8"),
+              logging.StreamHandler()]
+)
+
+header = {"user-agent": "Mozilla/5.0"}
 valid_fields = [
     "درمان", "ثالث - اجباري", "ثالث - مازاد و ديه", "حوادث سرنشين", "بدنه خودرو",
     "آتش سوزي", "باربري", "مسئوليت", "مهندسي", "کشتي", "هواپيما",
@@ -15,180 +27,197 @@ valid_fields = [
 ]
 
 
-def convert_persian_to_english_numbers(text):
-    if text is None or not isinstance(text, str):
-        return text
-    text = text.strip().replace(",", "")
-    if text in [".", "-", "0", "۰"]: return "0"
+# ---------- توابع کمکی (بدون تغییر) ----------
+def clean_text(text):
+    if not isinstance(text, str): return ""
+    mapping = {"ي": "ی", "ك": "ک", "‌": " "}
+    for k, v in mapping.items():
+        text = text.replace(k, v)
+    return re.sub(r"\s+", " ", text).strip()
 
+
+def extract_numeric(text):
+    if text is None: return 0.0
+    text = str(text).strip().replace(",", "")
+    if text in [".", "-", "0", "۰", ""]: return 0.0
     persian_digits = "۰۱۲۳۴۵۶۷۸۹"
     english_digits = "0123456789"
     mapping = str.maketrans(persian_digits, english_digits)
-    return text.translate(mapping)
-
-
-def safe_float_conversion(value):
     try:
-        if value is None: return 0.0
-        return float(value)
+        return float(text.translate(mapping))
     except:
         return 0.0
 
 
-def normalize_text(text):
-    if not isinstance(text, str):
-        return text
-    text = text.replace("ي", "ی").replace("ك", "ک")
-    text = text.replace("‌", " ")  # حذف نیم فاصله
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+def clean_column_header(h1, h2, h3):
+    h1 = h1.replace('از ابتدای سال مالی تا پایان مورخ', 'تجمعی').replace('دوره یک ماهه منتهی به', 'ماهانه')
+    h1 = re.sub(r'\d{4}/\d{2}/\d{2}', '', h1)
+    h1 = h1.replace('منتهی به', '').strip()
+    combined = f"{h1}_{h2}_{h3}"
+    clean_name = re.sub(r'[()| \-]', '_', combined)
+    clean_name = re.sub(r'_+', '_', clean_name).strip('_')
+    return clean_name
 
 
+# ---------- محاسبه‌ی پویای بازه‌ی ماه قبل (شمسی) ----------
+def get_previous_month_range():
+    """
+    بازه‌ی اولین روز تا آخرین روز «ماه جاری» شمسی را برمی‌گرداند.
+    """
+    today = jdatetime.date.today()
+    from_date = jdatetime.date(today.year, today.month, 1)
 
-page_number = 1
-while True:
-    print(f"Processing page {page_number}")
-    address = f"https://search.codal.ir/api/search/v2/q?Audited=true&AuditorRef=-1&Category=3&Childs=true&CompanyState=-1&CompanyType=-1&Consolidatable=true&FromDate=1405%2F01%2F01&IsNotAudited=false&Length=-1&LetterType=-1&Mains=true&NotAudited=true&NotConsolidatable=true&PageNumber={page_number}&Publisher=false&ReportingType=1000006&ToDate=1405%2F01%2F31&TracingNo=-1&search=true"
+    # محاسبه‌ی اولین روز ماه بعد، سپس یک روز عقب می‌رویم تا آخرین روز ماه جاری به دست آید
+    if today.month == 12:
+        first_of_next_month = jdatetime.date(today.year + 1, 1, 1)
+    else:
+        first_of_next_month = jdatetime.date(today.year, today.month + 1, 1)
 
-    try:
-        response = requests.get(address, headers=header)
-        data = response.text.split('SuperVision":{')[1:]
-    except:
-        break
+    to_date = first_of_next_month - jdatetime.timedelta(days=1)
 
-    if len(data) == 0: break
+    return from_date.strftime("%Y/%m/%d"), to_date.strftime("%Y/%m/%d")
 
-    for a in data:
+
+def build_search_url(from_date, to_date, page_number=1):
+    fd = from_date.replace("/", "%2F")
+    td = to_date.replace("/", "%2F")
+    return (
+        "https://search.codal.ir/api/search/v2/q?"
+        "Audited=true&AuditorRef=-1&Category=3&Childs=true&CompanyState=-1"
+        "&CompanyType=-1&Consolidatable=true"
+        f"&FromDate={fd}&IsNotAudited=false&Length=-1&LetterType=-1"
+        "&Mains=true&NotAudited=true&NotConsolidatable=true"
+        f"&PageNumber={page_number}&Publisher=false&ReportingType=1000006"
+        f"&ToDate={td}&TracingNo=-1&search=true"
+    )
+
+
+# ---------- منطق اصلی استخراج (هسته‌ی کد قبلی) ----------
+def extract_reports(from_date, to_date):
+    records = []
+    page_number = 1
+
+    while True:
+        logging.info(f"Processing page {page_number} ({from_date} → {to_date})...")
+        current_address = build_search_url(from_date, to_date, page_number)
+
         try:
-            url_report = a.split('Url":"/Reports/Decision.')[1].split('"')[0]
-            report_page = requests.get(f'https://www.codal.ir/Reports/Decision.{url_report}', headers=header).text
+            response = requests.get(current_address, headers=header, timeout=30)
+            data = response.text.split('SuperVision":{')[1:]
+        except Exception as e:
+            logging.warning(f"Search request failed: {e}")
+            break
+        if not data:
+            break
 
-            company_name = report_page.split('ctl00_txbCompanyName" class="label" style="color:#C04000;">')[1].split('</span>')[0].strip()
-            url_report_req = report_page.split('datasource = ')[1].splitlines()[0][:-1]
-            date = json.loads(url_report_req).get("publishDateTime")
-            sheet = json.loads(url_report_req)['sheets'][0]
-            report_period_fa = sheet.get('title_Fa', 'نامشخص')
+        for a in data:
+            try:
+                url_report = a.split('Url":"/Reports/Decision.')[1].split('"')[0]
+                report_page = requests.get(
+                    f'https://www.codal.ir/Reports/Decision.{url_report}',
+                    headers=header, timeout=15).text
 
-            for table in sheet['tables']:
-                cells = table['cells']
-                temp_table_data = {}
-                for cell_data in cells:
-                    addr = cell_data['address']
-                    val = cell_data['value']
-                    row_num = int(re.findall(r'\d+', addr)[0])
-                    col_char = re.findall(r'[A-Z]+', addr)[0]
-                    if row_num not in temp_table_data: temp_table_data[row_num] = {}
-                    temp_table_data[row_num][col_char] = val
+                company_name = report_page.split(
+                    'ctl00_txbCompanyName" class="label" style="color:#C04000;">'
+                )[1].split('</span>')[0].strip()
 
+                url_report_req = report_page.split('datasource = ')[1].splitlines()[0][:-1]
+                report_date = json.loads(url_report_req).get("periodEndToDate")
+                sheet = json.loads(url_report_req)['sheets'][0]
 
-                header_row_1 = temp_table_data.get(1, {})
-                header_row_2 = temp_table_data.get(2, {})
-                header_row_3 = temp_table_data.get(3, {})
+                for table in sheet['tables']:
+                    cells = table['cells']
+                    temp_table_data = {}
+                    for cell in cells:
+                        addr = cell['address']
+                        row_num = int(re.findall(r'\d+', addr)[0])
+                        col_char = re.findall(r'[A-Z]+', addr)[0]
+                        temp_table_data.setdefault(row_num, {})[col_char] = cell['value']
 
-                column_mapping = {}
-                curr_h1, curr_h2 = "", ""
+                    column_mapping = {}
+                    h1_row = temp_table_data.get(1, {})
+                    h2_row = temp_table_data.get(2, {})
+                    h3_row = temp_table_data.get(3, {})
+                    curr_h1, curr_h2 = "", ""
 
-                for col_char_code in range(ord('B'), ord('Z') + 1):
-                    col_char = chr(col_char_code)
+                    for col_idx in range(ord('B'), ord('Z') + 1):
+                        char = chr(col_idx)
+                        h1, h2, h3 = h1_row.get(char, ""), h2_row.get(char, ""), h3_row.get(char, "")
+                        if h1: curr_h1 = h1
+                        if h2: curr_h2 = h2
+                        if curr_h1 or curr_h2 or h3:
+                            column_mapping[char] = clean_column_header(curr_h1, curr_h2, h3)
 
-                    h1 = header_row_1.get(col_char, "").strip()
-                    h2 = header_row_2.get(col_char, "").strip()
-                    h3 = header_row_3.get(col_char, "").strip()
+                    last_field = ""
+                    for row_idx in sorted(temp_table_data.keys()):
+                        if row_idx < 4: continue
+                        row_data = temp_table_data[row_idx]
 
-                    if h1: curr_h1 = h1
-                    if h2: curr_h2 = h2
+                        field = clean_text(row_data.get("A", ""))
+                        if field: last_field = field
+                        if not last_field: continue
 
-                    if curr_h1 or curr_h2 or h3:
-                        clean_h1 = curr_h1.replace('از ابتدای سال مالی تا پایان مورخ', 'تجمعی') \
-                            .replace('دوره یک ماهه منتهی به', 'ماهانه')
+                        record = {
+                            "شرکت": clean_text(company_name),
+                            "دوره_گزارش": report_date,
+                            "رشته_بیمه": last_field
+                        }
+                        for col_char, col_name in column_mapping.items():
+                            record[col_name] = extract_numeric(row_data.get(col_char))
+                        records.append(record)
+            except Exception:
+                continue
+        page_number += 1
 
-                        # حذف تاریخ شمسی مثل 1405/01/31
-                        clean_h1 = re.sub(r'\d{4}/\d{2}/\d{2}', '', clean_h1)
-
-                        # حذف کلمه "منتهی به" اگر باقی موند
-                        clean_h1 = clean_h1.replace('منتهی به', '').strip()
-
-                        full_name = (f"{clean_h1}_{curr_h2}_{h3}".
-                                     replace(" | ", "_").
-                                     replace("(", "").replace(")","").
-                                     replace(" ", "_").replace("-", "_"))
-                        column_mapping[col_char] = f"{full_name}"
-
-                        column_mapping[col_char] = full_name
-
-                last_insurance_field = ""
-
-                for row_num in sorted(temp_table_data.keys()):
-                    if row_num < 4: continue
-
-                    row_data = temp_table_data[row_num]
-
-                    current_field = row_data.get("A", "").strip()
-
-                    if current_field:
-                        last_insurance_field = current_field
-
-                    insurance_field = last_insurance_field
-
-                    if not insurance_field:
-                        continue
-
-                    record = {
-                        "شرکت": company_name,
-                        "تاریخ_گزارش": date,
-                        "رشته_بیمه": insurance_field
-                    }
-
-                    for col_char, col_name in column_mapping.items():
-                        raw_val = row_data.get(col_char)
-                        clean_val = convert_persian_to_english_numbers(raw_val)
-                        record[col_name] = safe_float_conversion(clean_val)
-
-                    records.append(record)
-
-        except:
-            continue
-    page_number += 1
-
-# تبدیل به دیتافریم
-df = pd.DataFrame(records)
-
-# نرمال سازی ستون رشته بیمه
-df["رشته_بیمه"] = df["رشته_بیمه"].apply(normalize_text)
-
-# نرمال سازی valid_fields
-normalized_valid_fields = [normalize_text(v) for v in valid_fields]
-
-# نگه داشتن فقط رشته های مورد نظر
-df = df[df["رشته_بیمه"].isin(normalized_valid_fields)]
-
-df = df[~df.astype(str).apply(lambda row: row.str.contains("اتکايي", na=False)).any(axis=1)]
-
-for col in df.columns[3:]:
-    df[col] = df[col].apply(lambda x: 0.0 if pd.isna(x) or not isinstance(x, (int, float)) else x)
-    if df[col].dtype == 'object':
-        df[col] = df[col].astype(str).apply(lambda x: safe_float_conversion(x))
+    return records
 
 
-protected_columns = ["اصلاحات_خسارت_پرداختی_مبلغ_میلیون_ریال","اصلاحات_حق_بیمه_صادره_شامل_قبولی_اتکایی_مبلغ_میلیون_ریال"]
+# ---------- پردازش، فیلتر و ذخیره ----------
+def process_and_save(records, from_date):
+    if not records:
+        logging.warning("No records extracted. Skipping save.")
+        return 0
 
-cols_to_keep = [
-    col for col in df.columns
-    if col in protected_columns or (df[col] != 0).any()
-]
+    df = pd.DataFrame(records)
 
-df = df[cols_to_keep]
+    normalized_valid = [clean_text(f) for f in valid_fields]
+    df = df[df["رشته_بیمه"].isin(normalized_valid)]
+    df = df[~df["رشته_بیمه"].str.contains("اتکایی", na=False)]
+
+    non_data_cols = ["شرکت", "دوره_گزارش", "رشته_بیمه"]
+    data_cols = [c for c in df.columns if c not in non_data_cols]
+    active_data_cols = [c for c in data_cols if (df[c] != 0).any()]
+    df = df[non_data_cols + active_data_cols]
+
+    # برچسب ماه برای جلوگیری از بازنویسی داده‌های قبلی
+    month_tag = from_date.replace("/", "_")
+
+    # دیتابیس: داده‌ی هر اجرا append می‌شود (تاریخچه حفظ می‌شود)
+    engine = create_engine("sqlite:///insurance_data.db")
+    df.to_sql("InsuranceReports", con=engine, if_exists="replace", index=False)
+
+    # اکسل مجزا برای هر ماه
+    df.to_excel(f"insurance_report_{month_tag}.xlsx", index=False)
+
+    logging.info(f"✅ Done. {len(df)} rows saved for period {from_date}.")
+    return len(df)
 
 
-# ذخیره در دیتابیس
-engine = create_engine("sqlite:///insurance_data.db")
+# ---------- وظیفه‌ی اصلی که scheduler صدا می‌زند ----------
+def monthly_job():
+    try:
+        from_date, to_date = get_previous_month_range()
+        logging.info(f"=== Monthly job started for {from_date} → {to_date} ===")
+        records = extract_reports(from_date, to_date)
+        process_and_save(records, from_date)
+    except Exception as e:
+        logging.error(f"Monthly job failed: {e}", exc_info=True)
 
-df.to_sql(
-    name="InsuranceReports",
-    con=engine,
-    if_exists="replace",
-    index=False
-)
 
-df.to_excel("insurance_final_report.xlsx", index=False)
-print("✅ عملیات با موفقیت پایان یافت.")
+# ---------- زمان‌بندی ----------
+if __name__ == "__main__":
+    #if jdatetime.date.today().day == 10:
+        monthly_job()
+    #else:
+        #logging.info("Not the 10th of the Jalali month. Skipping run.")
+
