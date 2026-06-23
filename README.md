@@ -76,8 +76,5 @@ Health (درمان), Third-Party Mandatory (ثالث - اجباری), Third-Part
 
 Data is saved with `append` mode to preserve history. If new column schema conflicts with existing table structure, an `OperationalError` will occur. In this case, delete `insurance_data.db` and re-run the script.
 
-## License
-
-This project is licensed under the MIT License.
 
 ---
