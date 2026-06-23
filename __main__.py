@@ -194,7 +194,7 @@ def process_and_save(records, from_date):
 
     # دیتابیس: داده‌ی هر اجرا append می‌شود (تاریخچه حفظ می‌شود)
     engine = create_engine("sqlite:///insurance_data.db")
-    df.to_sql("InsuranceReports", con=engine, if_exists="replace", index=False)
+    df.to_sql("InsuranceReports", con=engine, if_exists="append", index=False)
 
     # اکسل مجزا برای هر ماه
     df.to_excel(f"insurance_report_{month_tag}.xlsx", index=False)
@@ -216,8 +216,8 @@ def monthly_job():
 
 # ---------- زمان‌بندی ----------
 if __name__ == "__main__":
-    #if jdatetime.date.today().day == 10:
+    if jdatetime.date.today().day == 10:
         monthly_job()
-    #else:
-        #logging.info("Not the 10th of the Jalali month. Skipping run.")
+    else:
+        logging.info("Not the 10th of the Jalali month. Skipping run.")
 
